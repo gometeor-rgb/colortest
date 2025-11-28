@@ -1,0 +1,466 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>เว็บเปรียบเทียบสีจากภาพกับสีต้นแบบ</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: system-ui, sans-serif; margin: 20px; line-height: 1.5; color: #111; }
+    h1 { font-size: 1.4rem; margin-bottom: 12px; }
+    .grid { display: grid; grid-template-columns: 1fr 320px; gap: 20px; align-items: start; }
+    canvas { border: 1px solid #ccc; max-width: 100%; height: auto; cursor: crosshair; background: #fff; }
+    .panel { border: 1px solid #e5e5e5; padding: 12px; background: #fafafa; }
+    label { display:block; margin: 8px 0 4px; }
+    input[type="text"], input[type="number"], select { width: 100%; padding: 6px; box-sizing: border-box; }
+    .swatches { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    .swatch { width: 40px; height: 40px; border: 1px solid #ddd; }
+    .result { margin-top: 10px; padding: 10px; background: #fff; border: 1px dashed #ddd; }
+    .tip { font-size: 0.9rem; color: #555; }
+    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    button { padding: 6px 10px; }
+    #saveStatus { margin-top:8px; color:#333; font-size:0.95rem; }
+    #zoomCanvas { border:1px solid #ccc; display:block; margin-top:8px; }
+  </style>
+</head>
+<body>
+
+<h1>เว็บเปรียบเทียบสีจากภาพกับสีต้นแบบสองสี</h1>
+
+<div class="grid">
+  <!-- Left: Image and canvas -->
+  <div>
+    <div class="panel">
+      <label>อัพโหลดภาพ (PNG/JPG)</label>
+      <input type="file" id="fileInput" accept="image/*" />
+      <p class="tip">คลิกบนภาพเพื่อเลือกจุดสี หรือเปิดโหมดเฉลี่ยรัศมีเพื่อเก็บค่าเฉลี่ยรอบจุด</p>
+
+      <div class="row">
+        <label style="display:flex; align-items:center; gap:8px;">
+          <input type="checkbox" id="avgMode" /> เปิดโหมดเฉลี่ยรัศมี
+        </label>
+        <label style="min-width:160px;">
+          รัศมีเฉลี่ย (พิกเซล)
+          <input type="number" id="radius" value="5" min="1" max="100" />
+        </label>
+      </div>
+
+      <canvas id="canvas" width="800" height="500"></canvas>
+
+      <h3>ภาพขยายพิกเซล (zoom)</h3>
+      <canvas id="zoomCanvas" width="200" height="200"></canvas>
+    </div>
+  </div>
+
+  <!-- Right: Controls -->
+  <div>
+    <div class="panel">
+      <h2 style="font-size:1.05rem;">ตั้งค่าสีต้นแบบ</h2>
+      <label>สี A: <input type="color" id="refA" value="#FF0000"></label>
+      <label>สี B: <input type="color" id="refB" value="#00FF00"></label>
+
+      <div class="row" style="margin-top:8px;">
+        <div class="swatch" id="swatchA"></div> A
+        <div class="swatch" id="swatchB"></div> B
+        <div class="swatch" id="swatchPick"></div> Picked
+      </div>
+
+      <h3 style="margin-top:10px;">กำหนดค่าตัวเลขของสีต้นแบบ</h3>
+      <label>ค่า A: <input type="number" id="valA" value="1"></label>
+      <label>ค่า B: <input type="number" id="valB" value="5"></label>
+
+      <label style="margin-top:10px;">โหมดคำนวณ Delta E</label>
+      <select id="deltaMode">
+        <option value="76">CIE76 (พื้นฐาน)</option>
+        <option value="2000" selected>CIEDE2000 (แม่น)</option>
+      </select>
+
+      <div class="panel" style="margin-top:10px;">
+        <div class="row">
+          <strong>สีจากภาพที่เลือก:</strong>
+          <div class="swatch" id="swatchPickSmall" title="picked small"></div>
+          <div id="pickedHex">ยังไม่ได้เลือก</div>
+        </div>
+        <div class="result" id="result">
+          <strong>ผลลัพธ์:</strong>
+          <div id="res_dEA">ΔE (A): -</div>
+          <div id="res_dEB">ΔE (B): -</div>
+          <div id="res_closer">ใกล้กับ: -</div>
+          <div id="res_val">ค่าที่เลือก: -</div>
+        </div>
+      </div>
+
+      <h3 style="margin-top:10px;">บันทึกผลลง Google Sheet</h3>
+      <label>ชื่อ: <input type="text" id="userName" placeholder="ชื่อผู้บันทึก"></label>
+      <button id="saveBtn">บันทึกผล</button>
+      <div id="saveStatus"></div>
+      <button id="testSendBtn" style="margin-top:8px;">ทดสอบส่งตัวอย่าง (ไม่ใช้ค่าสีจริง)</button>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ---------- Helpers ---------- */
+function clamp(v, min=0, max=255){ return Math.min(max, Math.max(min, v)); }
+function hexToRgb(hex) {
+  const m = String(hex).trim().match(/^#?([a-fA-F0-9]{6})$/);
+  if (!m) return null;
+  const n = parseInt(m[1], 16);
+  return { r: (n>>16)&255, g: (n>>8)&255, b: n&255 };
+}
+function rgbToHex({r,g,b}) {
+  return '#' + [r,g,b].map(x => clamp(Math.round(x)).toString(16).padStart(2,'0')).join('').toUpperCase();
+}
+
+/* sRGB -> linear */
+function srgbToLinear(c) {
+  c = c / 255;
+  return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+}
+
+/* linear RGB -> XYZ (D65) */
+function rgbToXyz(r,g,b) {
+  const R = srgbToLinear(r), G = srgbToLinear(g), B = srgbToLinear(b);
+  const X = R*0.4124564 + G*0.3575761 + B*0.1804375;
+  const Y = R*0.2126729 + G*0.7151522 + B*0.0721750;
+  const Z = R*0.0193339 + G*0.1191920 + B*0.9503041;
+  return {X, Y, Z};
+}
+
+/* XYZ -> LAB (D65 reference white) */
+function xyzToLab(X, Y, Z) {
+  const Xn = 0.95047, Yn = 1.00000, Zn = 1.08883;
+  let x = X / Xn, y = Y / Yn, z = Z / Zn;
+  const f = t => (t > 0.008856) ? Math.pow(t, 1/3) : (7.787*t + 16/116);
+  const fx = f(x), fy = f(y), fz = f(z);
+  const L = (y > 0.008856) ? (116*Math.pow(y,1/3)-16) : (903.3*y);
+  const a = 500*(fx - fy);
+  const b = 200*(fy - fz);
+  return {L, a, b};
+}
+
+function rgbToLab({r,g,b}) {
+  const {X,Y,Z} = rgbToXyz(r,g,b);
+  return xyzToLab(X,Y,Z);
+}
+
+/* Delta E CIE76 */
+function deltaE76(L1,a1,b1, L2,a2,b2) {
+  const dL = L1-L2, da=a1-a2, db=b1-b2;
+  return Math.sqrt(dL*dL + da*da + db*db);
+}
+
+/* Delta E CIEDE2000 */
+function deltaE2000(L1,a1,b1, L2,a2,b2) {
+  const rad2deg = r => r * (180/Math.PI);
+  const deg2rad = d => d * (Math.PI/180);
+
+  const C1 = Math.sqrt(a1*a1 + b1*b1);
+  const C2 = Math.sqrt(a2*a2 + b2*b2);
+  const avgC = (C1 + C2) / 2;
+  const G = 0.5 * (1 - Math.sqrt(Math.pow(avgC,7) / (Math.pow(avgC,7) + Math.pow(25,7))));
+  const a1p = (1+G) * a1;
+  const a2p = (1+G) * a2;
+  const C1p = Math.sqrt(a1p*a1p + b1*b1);
+  const C2p = Math.sqrt(a2p*a2p + b2*b2);
+  const h1p = Math.atan2(b1, a1p) + (Math.atan2(b1, a1p) < 0 ? 2*Math.PI : 0);
+  const h2p = Math.atan2(b2, a2p) + (Math.atan2(b2, a2p) < 0 ? 2*Math.PI : 0);
+
+  const dLp = L2 - L1;
+  const dCp = C2p - C1p;
+  let dhp = h2p - h1p;
+  if (dhp > Math.PI) dhp -= 2*Math.PI;
+  if (dhp < -Math.PI) dhp += 2*Math.PI;
+  const dHp = 2*Math.sqrt(C1p*C2p) * Math.sin(dhp/2);
+
+  const avgLp = (L1 + L2) / 2;
+  const avgCp = (C1p + C2p) / 2;
+  let avgHp = (h1p + h2p) / 2;
+  if (Math.abs(h1p - h2p) > Math.PI) {
+    avgHp = (h1p + h2p < 2*Math.PI) ? (h1p + h2p + 2*Math.PI)/2 : (h1p + h2p - 2*Math.PI)/2;
+  }
+
+  const T = 1
+    - 0.17 * Math.cos(avgHp - deg2rad(30))
+    + 0.24 * Math.cos(2*avgHp)
+    + 0.32 * Math.cos(3*avgHp + deg2rad(6))
+    - 0.20 * Math.cos(4*avgHp - deg2rad(63));
+
+  const dRo = deg2rad(30) * Math.exp(- Math.pow((rad2deg(avgHp) - 275) / 25, 2));
+  const Rc = 2 * Math.sqrt(Math.pow(avgCp, 7) / (Math.pow(avgCp, 7) + Math.pow(25, 7)));
+  const Rt = -Rc * Math.sin(2 * dRo);
+
+  const Sl = 1 + (0.015 * Math.pow(avgLp - 50, 2)) / Math.sqrt(20 + Math.pow(avgLp - 50, 2));
+  const Sc = 1 + 0.045 * avgCp;
+  const Sh = 1 + 0.015 * avgCp * T;
+
+  const Kl = 1, Kc = 1, Kh = 1;
+
+  const dE = Math.sqrt(
+    Math.pow(dLp / (Kl * Sl), 2) +
+    Math.pow(dCp / (Kc * Sc), 2) +
+    Math.pow(dHp / (Kh * Sh), 2) +
+    Rt * (dCp / (Kc * Sc)) * (dHp / (Kh * Sh))
+  );
+  return dE;
+}
+
+/* ---------- App state & elements ---------- */
+const fileInput = document.getElementById('fileInput');
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const zoomCanvas = document.getElementById('zoomCanvas');
+const zoomCtx = zoomCanvas.getContext('2d');
+
+const refA = document.getElementById('refA');
+const refB = document.getElementById('refB');
+const swatchA = document.getElementById('swatchA');
+const swatchB = document.getElementById('swatchB');
+const swatchPick = document.getElementById('swatchPick');
+const swatchPickSmall = document.getElementById('swatchPickSmall');
+const pickedHexEl = document.getElementById('pickedHex');
+const resultEl = document.getElementById('result');
+const deltaMode = document.getElementById('deltaMode');
+const avgMode = document.getElementById('avgMode');
+const radiusEl = document.getElementById('radius');
+const valAEl = document.getElementById('valA');
+const valBEl = document.getElementById('valB');
+const saveBtn = document.getElementById('saveBtn');
+const saveStatus = document.getElementById('saveStatus');
+const testSendBtn = document.getElementById('testSendBtn');
+
+let lastPicked = null; // {r,g,b}
+
+/* ---------- Image handling ---------- */
+function drawImageToCanvas(img) {
+  // Fit image into canvas while preserving aspect ratio and center it
+  const scale = Math.min(canvas.width / img.width, canvas.height / img.height);
+  const w = Math.round(img.width * scale);
+  const h = Math.round(img.height * scale);
+  const ox = Math.floor((canvas.width - w)/2);
+  const oy = Math.floor((canvas.height - h)/2);
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.drawImage(img, ox, oy, w, h);
+}
+
+fileInput.addEventListener('change', e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = evt => {
+    const img = new Image();
+    img.onload = () => drawImageToCanvas(img);
+    img.src = evt.target.result;
+  };
+  reader.readAsDataURL(file);
+});
+
+/* ---------- UI updates ---------- */
+function updateSwatches() {
+  const a = hexToRgb(refA.value);
+  const b = hexToRgb(refB.value);
+  swatchA.style.background = a ? rgbToHex(a) : '#fff';
+  swatchB.style.background = b ? rgbToHex(b) : '#fff';
+}
+refA.addEventListener('input', updateSwatches);
+refB.addEventListener('input', updateSwatches);
+updateSwatches();
+
+/* ---------- Zoom display ---------- */
+function showZoom(x, y) {
+  const size = 11; // odd so center pixel is clear
+  const scale = 16; // pixel scale
+  const half = Math.floor(size/2);
+  // clamp region to canvas bounds
+  const sx = Math.max(0, x - half);
+  const sy = Math.max(0, y - half);
+  const sw = Math.min(size, canvas.width - sx);
+  const sh = Math.min(size, canvas.height - sy);
+  try {
+    const imgData = ctx.getImageData(sx, sy, sw, sh);
+    zoomCtx.clearRect(0,0,zoomCanvas.width,zoomCanvas.height);
+    // fill background
+    zoomCtx.fillStyle = '#fff';
+    zoomCtx.fillRect(0,0,zoomCanvas.width,zoomCanvas.height);
+    for (let j=0;j<sh;j++){
+      for (let i=0;i<sw;i++){
+        const idx = (j*sw + i)*4;
+        const r = imgData.data[idx], g = imgData.data[idx+1], b = imgData.data[idx+2];
+        zoomCtx.fillStyle = `rgb(${r},${g},${b})`;
+        zoomCtx.fillRect(i*scale, j*scale, scale, scale);
+      }
+    }
+    // highlight center pixel
+    const cx = Math.min(half, sw-1);
+    const cy = Math.min(half, sh-1);
+    zoomCtx.strokeStyle = 'red';
+    zoomCtx.lineWidth = 2;
+    zoomCtx.strokeRect(cx*scale, cy*scale, scale, scale);
+  } catch (err) {
+    // ignore if out of bounds
+    zoomCtx.clearRect(0,0,zoomCanvas.width,zoomCanvas.height);
+  }
+}
+
+/* ---------- Picking color ---------- */
+canvas.addEventListener('click', e => {
+  const rect = canvas.getBoundingClientRect();
+  const x = Math.floor(e.clientX - rect.left);
+  const y = Math.floor(e.clientY - rect.top);
+
+  const rad = parseInt(radiusEl.value || '1', 10);
+  let rSum=0, gSum=0, bSum=0, count=0;
+
+  if (avgMode.checked && rad > 0) {
+    for (let dy=-rad; dy<=rad; dy++){
+      for (let dx=-rad; dx<=rad; dx++){
+        const nx = x + dx, ny = y + dy;
+        if (nx<0 || ny<0 || nx>=canvas.width || ny>=canvas.height) continue;
+        const pix = ctx.getImageData(nx, ny, 1, 1).data;
+        rSum += pix[0]; gSum += pix[1]; bSum += pix[2]; count++;
+      }
+    }
+  } else {
+    const pix = ctx.getImageData(x, y, 1, 1).data;
+    rSum = pix[0]; gSum = pix[1]; bSum = pix[2]; count = 1;
+  }
+
+  if (count === 0) return;
+  const picked = { r: rSum / count, g: gSum / count, b: bSum / count };
+  lastPicked = picked; // เก็บค่าสีที่เลือกไว้ใช้ตอนบันทึก
+  const pickedHex = rgbToHex(picked);
+  swatchPick.style.background = pickedHex;
+  swatchPickSmall.style.background = pickedHex;
+  pickedHexEl.textContent = `HEX: ${pickedHex} | RGB: (${Math.round(picked.r)}, ${Math.round(picked.g)}, ${Math.round(picked.b)})`;
+
+  // แสดง zoom
+  showZoom(x, y);
+
+  // คำนวณและแสดงผล
+  compareColors(picked);
+});
+
+/* ---------- Comparison ---------- */
+function compareColors(pickedRgb) {
+  const aRgb = hexToRgb(refA.value);
+  const bRgb = hexToRgb(refB.value);
+  if (!aRgb || !bRgb || !pickedRgb) {
+    document.getElementById('res_dEA').textContent = 'ΔE (A): -';
+    document.getElementById('res_dEB').textContent = 'ΔE (B): -';
+    document.getElementById('res_closer').textContent = 'ใกล้กับ: -';
+    document.getElementById('res_val').textContent = 'ค่าที่เลือก: -';
+    return;
+  }
+
+  const pLab = rgbToLab(pickedRgb);
+  const aLab = rgbToLab(aRgb);
+  const bLab = rgbToLab(bRgb);
+
+  let dEA, dEB;
+  if (deltaMode.value === '2000') {
+    dEA = deltaE2000(pLab.L, pLab.a, pLab.b, aLab.L, aLab.a, aLab.b);
+    dEB = deltaE2000(pLab.L, pLab.a, pLab.b, bLab.L, bLab.a, bLab.b);
+  } else {
+    dEA = deltaE76(pLab.L, pLab.a, pLab.b, aLab.L, aLab.a, aLab.b);
+    dEB = deltaE76(pLab.L, pLab.a, pLab.b, bLab.L, bLab.a, bLab.b);
+  }
+
+  const closer = dEA < dEB ? 'สี A' : 'สี B';
+
+  const valA = parseFloat(valAEl.value || '0');
+  const valB = parseFloat(valBEl.value || '0');
+  let valPicked;
+  if (dEA + dEB === 0) {
+    valPicked = (valA + valB) / 2;
+  } else {
+    const weightA = 1 / (dEA + 1e-6);
+    const weightB = 1 / (dEB + 1e-6);
+    valPicked = (valA * weightA + valB * weightB) / (weightA + weightB);
+  }
+
+  document.getElementById('res_dEA').textContent = `ΔE (A): ${dEA.toFixed(2)}`;
+  document.getElementById('res_dEB').textContent = `ΔE (B): ${dEB.toFixed(2)}`;
+  document.getElementById('res_closer').textContent = `ใกล้กับ: ${closer}`;
+  document.getElementById('res_val').textContent = `ค่าที่เลือก: ${valPicked.toFixed(2)}`;
+}
+
+/* ---------- Save to Google Sheet ---------- */
+/* ใช้ URL Web App ที่คุณให้มา */
+const SCRIPT_URL = "https://script.google.com/macros/s/AKfycby1cIlbu-X9eKpJrVwOQ_C9u8tcQGI214kGGSlCsyWG5ZLY7pmPG5JrIuBp_jQYPn1d6Q/exec";
+
+async function sendToSheet(payload) {
+  saveStatus.textContent = 'กำลังบันทึก...';
+  try {
+    const res = await fetch(SCRIPT_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    const text = await res.text();
+    saveStatus.textContent = 'ผลลัพธ์จากเซิร์ฟเวอร์: ' + text;
+    return { ok: true, text };
+  } catch (err) {
+    saveStatus.textContent = 'เกิดข้อผิดพลาด: ' + err;
+    console.error(err);
+    return { ok: false, err };
+  }
+}
+
+saveBtn.addEventListener('click', async () => {
+  if (!lastPicked) {
+    alert("กรุณาเลือกสีจากภาพก่อนบันทึก");
+    return;
+  }
+  const name = document.getElementById('userName').value || 'ไม่ระบุ';
+  const hex = rgbToHex(lastPicked);
+  const rgb = `(${Math.round(lastPicked.r)},${Math.round(lastPicked.g)},${Math.round(lastPicked.b)})`;
+
+  const aRgb = hexToRgb(refA.value);
+  const bRgb = hexToRgb(refB.value);
+  if (!aRgb || !bRgb) {
+    alert("สีต้นแบบไม่ถูกต้อง");
+    return;
+  }
+
+  const pLab = rgbToLab(lastPicked);
+  const aLab = rgbToLab(aRgb);
+  const bLab = rgbToLab(bRgb);
+  const use2000 = (deltaMode.value === '2000');
+  const dEA = use2000 ? deltaE2000(pLab.L,pLab.a,pLab.b,aLab.L,aLab.a,aLab.b)
+                      : deltaE76(pLab.L,pLab.a,pLab.b,aLab.L,aLab.a,aLab.b);
+  const dEB = use2000 ? deltaE2000(pLab.L,pLab.a,pLab.b,bLab.L,bLab.a,bLab.b)
+                      : deltaE76(pLab.L,pLab.a,pLab.b,bLab.L,bLab.a,bLab.b);
+  const closer = dEA < dEB ? 'A' : 'B';
+  const valA = parseFloat(valAEl.value || '0'), valB = parseFloat(valBEl.value || '0');
+  const wA = 1/(dEA+1e-6), wB = 1/(dEB+1e-6);
+  const value = (valA*wA + valB*wB)/(wA+wB);
+
+  const payload = { name, hex, rgb, dEA, dEB, closer, value };
+
+  const result = await sendToSheet(payload);
+  if (result.ok) {
+    alert('บันทึกสำเร็จ: ' + result.text);
+  } else {
+    alert('บันทึกล้มเหลว ดูสถานะด้านล่างหรือ DevTools Network');
+  }
+});
+
+/* ---------- Test send (sample payload) ---------- */
+testSendBtn.addEventListener('click', async () => {
+  const sample = {
+    name: "TestUser",
+    hex: "#00AAFF",
+    rgb: "(0,170,255)",
+    dEA: 1.23,
+    dEB: 4.56,
+    closer: "A",
+    value: 2.5
+  };
+  const result = await sendToSheet(sample);
+  if (result.ok) alert('ทดสอบส่งสำเร็จ: ' + result.text);
+  else alert('ทดสอบส่งล้มเหลว: ' + result.err);
+});
+</script>
+
+</body>
+</html>
